@@ -21,8 +21,7 @@ import (
 )
 
 const (
-	service   = "cmdpipe"
-	queueName = "commands"
+	service = "cmdpipe"
 )
 
 type Command struct {
@@ -76,18 +75,18 @@ func (c *CommandConsumer) Consume(delivery rmq.Delivery) {
 		return
 	}
 
+	outConn, inConn, errConn, exitConn := dialAll(command)
+	defer outConn.Close()
+	defer inConn.Close()
+	defer errConn.Close()
+	defer exitConn.Close()
+
 	fmt.Printf("Got command [%s]\n", command.Name)
 	if command.Name != c.AllowedName {
 		log.Printf("Rejecting [%s]\n", command.Name)
 		delivery.Reject()
 		return
 	}
-
-	outConn, inConn, errConn, exitConn := dialAll(command)
-	defer outConn.Close()
-	defer inConn.Close()
-	defer errConn.Close()
-	defer exitConn.Close()
 
 	fmt.Printf("Dialed: %s %s %s %s\n", command.Out, command.In, command.Error, command.Exit)
 
@@ -126,19 +125,23 @@ func getTemp() string {
 	return tmp
 }
 
+func getQueueName(commandName string) string {
+	return "command:" + commandName
+}
+
 func Receive() {
-
-	conn := rmq.OpenConnection(service, "unix", path.Join(getTemp(), "redis.sock"), 1)
-	defer conn.Close()
-	queue := conn.OpenQueue(queueName)
-	queue.StartConsuming(10, 400*time.Millisecond)
-
 	if len(os.Args) <= 1 {
 		log.Printf("Need an argument to signify the allowed command")
 		return
 	}
+	commandName := os.Args[1]
 
-	queue.AddConsumer("command consumer", &CommandConsumer{os.Args[1]})
+	conn := rmq.OpenConnection(service, "unix", path.Join(getTemp(), "redis.sock"), 1)
+	defer conn.Close()
+	queue := conn.OpenQueue(getQueueName(commandName))
+	queue.StartConsuming(10, 400*time.Millisecond)
+
+	queue.AddConsumer("command consumer", &CommandConsumer{commandName})
 	select {}
 }
 
@@ -147,9 +150,15 @@ func genCommandPipeSocket(pipeType string) string {
 }
 
 func Send() int {
+	if len(os.Args) <= 1 {
+		log.Printf("Need a command name argument")
+		return 1
+	}
+	commandName := os.Args[1]
+
 	conn := rmq.OpenConnection(service, "unix", path.Join(getTemp(), "redis.sock"), 1)
 	defer conn.Close()
-	queue := conn.OpenQueue(queueName)
+	queue := conn.OpenQueue(getQueueName(commandName))
 
 	outSock := genCommandPipeSocket("out")
 	defer os.Remove(outSock)
@@ -243,16 +252,12 @@ func Send() int {
 		exit <- exitCode
 	}(exitConn)
 
-	if len(os.Args) <= 1 {
-		log.Printf("Need a command name argument")
-	}
-
 	params := []string{}
 	if len(os.Args) > 2 {
 		params = os.Args[2:]
 	}
 	bs, err := json.Marshal(Command{
-		Name:   os.Args[1],
+		Name:   commandName,
 		Params: params,
 		Out:    outSock,
 		In:     inSock,
