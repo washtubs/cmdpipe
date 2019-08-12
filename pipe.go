@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -27,6 +28,7 @@ const (
 type Command struct {
 	Name   string   `json:"name"`
 	Params []string `json:"params"`
+	Env    []string `json:"env"`
 	Out    string   `json:"out"`
 	In     string   `json:"in"`
 	Error  string   `json:"error"`
@@ -38,25 +40,25 @@ type CommandConsumer struct {
 }
 
 func dialAll(command Command) (outConn, inConn, errConn, exitConn net.Conn) {
-	outConn, err := net.Dial("unix", command.Out)
+	outConn, err := net.Dial("unix", inTemp(command.Out))
 	if err != nil {
 		log.Printf("Error dialing output %s: %s", command.Out, err.Error())
 		return
 	}
 
-	inConn, err = net.Dial("unix", command.In)
+	inConn, err = net.Dial("unix", inTemp(command.In))
 	if err != nil {
 		log.Printf("Error dialing input %s: %s", command.In, err.Error())
 		return
 	}
 
-	errConn, err = net.Dial("unix", command.Error)
+	errConn, err = net.Dial("unix", inTemp(command.Error))
 	if err != nil {
 		log.Printf("Error dialing error %s: %s", command.Error, err.Error())
 		return
 	}
 
-	exitConn, err = net.Dial("unix", command.Exit)
+	exitConn, err = net.Dial("unix", inTemp(command.Exit))
 	if err != nil {
 		log.Printf("Error dialing exit %s: %s", command.Exit, err.Error())
 		return
@@ -91,6 +93,7 @@ func (c *CommandConsumer) Consume(delivery rmq.Delivery) {
 	fmt.Printf("Dialed: %s %s %s %s\n", command.Out, command.In, command.Error, command.Exit)
 
 	cmd := exec.Command(c.AllowedName, command.Params...)
+	cmd.Env = append(os.Environ(), command.Env...)
 	cmd.Stdout = outConn
 	cmd.Stdin = inConn
 	cmd.Stderr = errConn
@@ -146,7 +149,20 @@ func Receive() {
 }
 
 func genCommandPipeSocket(pipeType string) string {
-	return path.Join(getTemp(), "cmdpipe-"+RandStringBytesMaskImprSrc(6)+"-"+pipeType)
+	return "cmdpipe-" + RandStringBytesMaskImprSrc(6) + "-" + pipeType
+}
+
+func inTemp(relativeToTemp string) string {
+	return path.Join(getTemp(), relativeToTemp)
+}
+
+func PropogateEnvironment() []string {
+	env := os.Getenv("CMDPIPE_ENV")
+	if env == "" {
+		return []string{}
+	} else {
+		return strings.Split(env, ";")
+	}
 }
 
 func Send() int {
@@ -161,29 +177,29 @@ func Send() int {
 	queue := conn.OpenQueue(getQueueName(commandName))
 
 	outSock := genCommandPipeSocket("out")
-	defer os.Remove(outSock)
-	outConn, err := net.Listen("unix", outSock)
+	defer os.Remove(inTemp(outSock))
+	outConn, err := net.Listen("unix", inTemp(outSock))
 	if err != nil {
 		panic(err.Error())
 	}
 
 	errSock := genCommandPipeSocket("err")
-	defer os.Remove(errSock)
-	errConn, err := net.Listen("unix", errSock)
+	defer os.Remove(inTemp(errSock))
+	errConn, err := net.Listen("unix", inTemp(errSock))
 	if err != nil {
 		panic(err.Error())
 	}
 
 	inSock := genCommandPipeSocket("in")
-	defer os.Remove(inSock)
-	inConn, err := net.Listen("unix", inSock)
+	defer os.Remove(inTemp(inSock))
+	inConn, err := net.Listen("unix", inTemp(inSock))
 	if err != nil {
 		panic(err.Error())
 	}
 
 	exitSock := genCommandPipeSocket("exit")
-	defer os.Remove(exitSock)
-	exitConn, err := net.Listen("unix", exitSock)
+	defer os.Remove(inTemp(exitSock))
+	exitConn, err := net.Listen("unix", inTemp(exitSock))
 	if err != nil {
 		panic(err.Error())
 	}
@@ -259,6 +275,7 @@ func Send() int {
 	bs, err := json.Marshal(Command{
 		Name:   commandName,
 		Params: params,
+		Env:    PropogateEnvironment(),
 		Out:    outSock,
 		In:     inSock,
 		Error:  errSock,
